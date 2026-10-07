@@ -154,6 +154,7 @@ public:
 
     bool start_closed_loop_control();
     bool stop_closed_loop_control();
+    bool uses_encoderless_brushed_torque_control() const;
     bool run_lockin_spin(const LockinConfig_t &lockin_config, bool remain_armed,
                 std::function<bool(bool)> loop_cb = {} );
     bool run_closed_loop_control_loop();

@@ -47,6 +47,10 @@ FLOAT_ABI = -mfloat-abi=hard
 MCU       = $(CPU) -mthumb $(FPU) $(FLOAT_ABI)
 
 # --- Defines -----------------------------------------------------------------
+# FFB_MOTOR_OUTPUT=0: the FFB effects never write axis0 input_torque, so RC PWM,
+# USB or CAN keep control of the motor. Build with FFB_MOTOR_OUTPUT=1 to get
+# the force-feedback wheel behaviour back.
+FFB_MOTOR_OUTPUT ?= 0
 # Build MKS XDrive Mini style: v3.6-56V (mesmo que MKS v0.5.1 oficial usa).
 # - HW_VERSION_VOLTAGE=56: OVP trip = 59.92V (seguro pra 24V real).
 # - VBUS divider ja hardcoded como 19:1 em low_level.cpp (nosso patch previo).
@@ -87,6 +91,7 @@ DEFS = -DSTM32F405xx \
        -DFIBRE_ENABLE_LIBUSB_BACKEND=0 \
        -DFIBRE_ENABLE_TCP_SERVER_BACKEND=0 \
        -DFIBRE_ENABLE_TCP_CLIENT_BACKEND=0 \
+       -DODRIVE_WHEEL_FFB_MOTOR_OUTPUT=$(FFB_MOTOR_OUTPUT) \
        -D__weak=__attribute__\(\(weak\)\) \
        -D__packed=__attribute__\(\(__packed__\)\)
 
@@ -213,6 +218,7 @@ CPP_SOURCES_MC = \
   $(MC_DIR)/mechanical_brake.cpp \
   $(MC_DIR)/controller.cpp \
   $(MC_DIR)/foc.cpp \
+  $(MC_DIR)/brushed_dc.cpp \
   $(MC_DIR)/open_loop_controller.cpp \
   $(MC_DIR)/oscilloscope.cpp \
   $(MC_DIR)/sensorless_estimator.cpp \

@@ -254,8 +254,23 @@ bool Axis::run_lockin_spin(const LockinConfig_t &lockin_config, bool remain_arme
 }
 
 
+bool Axis::uses_encoderless_brushed_torque_control() const {
+    return motor_.config_.motor_type == Motor::MOTOR_TYPE_BRUSHED_DC
+        && controller_.config_.control_mode == Controller::CONTROL_MODE_TORQUE_CONTROL
+        && controller_.config_.input_mode == Controller::INPUT_MODE_PASSTHROUGH
+        && encoder_.config_.direction == 0
+        && !config_.enable_sensorless_mode;
+}
+
 bool Axis::start_closed_loop_control() {
     bool sensorless_mode = config_.enable_sensorless_mode;
+    const bool is_brushed = motor_.config_.motor_type == Motor::MOTOR_TYPE_BRUSHED_DC;
+    const bool encoderless_brushed_torque = uses_encoderless_brushed_torque_control();
+
+    if (is_brushed && sensorless_mode) {
+        error_ |= ERROR_INVALID_STATE;
+        return false;
+    }
 
     if (sensorless_mode) {
         // TODO: restart if desired
@@ -271,6 +286,14 @@ bool Axis::start_closed_loop_control() {
             controller_.pos_estimate_circular_src_.disconnect();
             controller_.pos_wrap_src_.disconnect();
             controller_.vel_estimate_src_.connect_to(&sensorless_estimator_.vel_estimate_);
+        } else if (encoderless_brushed_torque) {
+            // A conventional brushed current/torque command needs no rotor
+            // position or velocity estimate. Feedback modes still take the
+            // normal encoder path below.
+            controller_.pos_estimate_circular_src_.disconnect();
+            controller_.pos_wrap_src_.disconnect();
+            controller_.pos_estimate_linear_src_.disconnect();
+            controller_.vel_estimate_src_.disconnect();
         } else if (controller_.config_.load_encoder_axis < AXIS_COUNT) {
             Axis* ax = &axes[controller_.config_.load_encoder_axis];
             controller_.pos_estimate_circular_src_.connect_to(&ax->encoder_.pos_circular_);
@@ -294,24 +317,35 @@ bool Axis::start_closed_loop_control() {
         controller_.vel_integrator_torque_ = 0.0f;
 
         motor_.torque_setpoint_src_.connect_to(&controller_.torque_output_);
-        motor_.direction_ = sensorless_mode ? 1.0f : encoder_.config_.direction;
+        motor_.direction_ = (sensorless_mode || encoderless_brushed_torque)
+                ? 1.0f : encoder_.config_.direction;
 
         motor_.current_control_.enable_current_control_src_ = motor_.config_.motor_type != Motor::MOTOR_TYPE_GIMBAL;
         motor_.current_control_.Idq_setpoint_src_.connect_to(&motor_.Idq_setpoint_);
         motor_.current_control_.Vdq_setpoint_src_.connect_to(&motor_.Vdq_setpoint_);
+        motor_.brushed_dc_control_.Idq_setpoint_src_.connect_to(&motor_.Idq_setpoint_);
+        motor_.brushed_dc_control_.Vdq_setpoint_src_.connect_to(&motor_.Vdq_setpoint_);
 
-        bool is_acim = motor_.config_.motor_type == Motor::MOTOR_TYPE_ACIM;
-        // phase
-        OutputPort<float>* phase_src = sensorless_mode ? &sensorless_estimator_.phase_ : &encoder_.phase_;
-        acim_estimator_.rotor_phase_src_.connect_to(phase_src);
-        OutputPort<float>* stator_phase_src = is_acim ? &acim_estimator_.stator_phase_ : phase_src;
-        motor_.current_control_.phase_src_.connect_to(stator_phase_src);
-        // phase vel
-        OutputPort<float>* phase_vel_src = sensorless_mode ? &sensorless_estimator_.phase_vel_ : &encoder_.phase_vel_;
-        acim_estimator_.rotor_phase_vel_src_.connect_to(phase_vel_src);
-        OutputPort<float>* stator_phase_vel_src = is_acim ? &acim_estimator_.stator_phase_vel_ : phase_vel_src;
-        motor_.phase_vel_src_.connect_to(stator_phase_vel_src);
-        motor_.current_control_.phase_vel_src_.connect_to(stator_phase_vel_src);
+        if (encoderless_brushed_torque) {
+            acim_estimator_.rotor_phase_src_.disconnect();
+            acim_estimator_.rotor_phase_vel_src_.disconnect();
+            motor_.current_control_.phase_src_.disconnect();
+            motor_.phase_vel_src_.disconnect();
+            motor_.current_control_.phase_vel_src_.disconnect();
+        } else {
+            bool is_acim = motor_.config_.motor_type == Motor::MOTOR_TYPE_ACIM;
+            // phase
+            OutputPort<float>* phase_src = sensorless_mode ? &sensorless_estimator_.phase_ : &encoder_.phase_;
+            acim_estimator_.rotor_phase_src_.connect_to(phase_src);
+            OutputPort<float>* stator_phase_src = is_acim ? &acim_estimator_.stator_phase_ : phase_src;
+            motor_.current_control_.phase_src_.connect_to(stator_phase_src);
+            // phase vel
+            OutputPort<float>* phase_vel_src = sensorless_mode ? &sensorless_estimator_.phase_vel_ : &encoder_.phase_vel_;
+            acim_estimator_.rotor_phase_vel_src_.connect_to(phase_vel_src);
+            OutputPort<float>* stator_phase_vel_src = is_acim ? &acim_estimator_.stator_phase_vel_ : phase_vel_src;
+            motor_.phase_vel_src_.connect_to(stator_phase_vel_src);
+            motor_.current_control_.phase_vel_src_.connect_to(stator_phase_vel_src);
+        }
         
         if (sensorless_mode) {
             // Make the final velocity of the loĉk-in spin the setpoint of the
@@ -325,7 +359,11 @@ bool Axis::start_closed_loop_control() {
     // In sensorless mode the motor is already armed.
     if (!motor_.is_armed_) {
         wait_for_control_iteration();
-        motor_.arm(&motor_.current_control_);
+        if (!motor_.arm(is_brushed
+                    ? static_cast<PhaseControlLaw<3>*>(&motor_.brushed_dc_control_)
+                    : static_cast<PhaseControlLaw<3>*>(&motor_.current_control_))) {
+            return false;
+        }
     }
 
     return true;
@@ -337,7 +375,9 @@ bool Axis::stop_closed_loop_control() {
 }
 
 bool Axis::run_closed_loop_control_loop() {
-    start_closed_loop_control();
+    if (!start_closed_loop_control()) {
+        return false;
+    }
     set_step_dir_active(config_.enable_step_dir);
 
     while ((requested_state_ == AXIS_STATE_UNDEFINED) && motor_.is_armed_) {
@@ -572,7 +612,12 @@ void Axis::run_state_machine_loop() {
             case AXIS_STATE_CLOSED_LOOP_CONTROL: {
                 //if (odrv.any_error())
                 //    goto invalid_state_label;
-                if (!motor_.is_calibrated_ || (encoder_.config_.direction==0 && !config_.enable_sensorless_mode))
+                if (!motor_.is_calibrated_
+                        || (encoder_.config_.direction==0
+                            && !config_.enable_sensorless_mode
+                            && !uses_encoderless_brushed_torque_control())
+                        || (motor_.config_.motor_type == Motor::MOTOR_TYPE_BRUSHED_DC
+                            && config_.enable_sensorless_mode))
                     goto invalid_state_label;
                 watchdog_feed();
                 status = run_closed_loop_control_loop();

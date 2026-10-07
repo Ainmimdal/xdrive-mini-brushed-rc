@@ -167,6 +167,8 @@ bool Controller::update() {
     std::optional<float> pos_estimate_circular = pos_estimate_circular_src_.present();
     std::optional<float> pos_wrap = pos_wrap_src_.present();
     std::optional<float> vel_estimate = vel_estimate_src_.present();
+    const bool encoderless_brushed_torque =
+            axis_->uses_encoderless_brushed_torque_control();
 
     std::optional<float> anticogging_pos_estimate = axis_->encoder_.pos_estimate_.present();
     std::optional<float> anticogging_vel_estimate = axis_->encoder_.vel_estimate_.present();
@@ -351,7 +353,7 @@ bool Controller::update() {
     }
 
     // Check for overspeed fault (done in this module (controller) for cohesion with vel_lim)
-    if (config_.enable_overspeed_error) {  // 0.0f to disable
+    if (config_.enable_overspeed_error && !encoderless_brushed_torque) {
         if (!vel_estimate.has_value()) {
             set_error(ERROR_INVALID_ESTIMATE);
             return false;
@@ -383,7 +385,8 @@ bool Controller::update() {
     // Anti-cogging is enabled after calibration
     // We get the current position and apply a current feed-forward
     // ensuring that we handle negative encoder positions properly (-1 == motor->encoder.encoder_cpr - 1)
-    if (anticogging_valid_ && config_.anticogging.anticogging_enabled) {
+    if (!encoderless_brushed_torque
+            && anticogging_valid_ && config_.anticogging.anticogging_enabled) {
         if (!anticogging_pos_estimate.has_value()) {
             set_error(ERROR_INVALID_ESTIMATE);
             return false;
@@ -407,7 +410,9 @@ bool Controller::update() {
     }
 
     // Velocity limiting in current mode
-    if (config_.control_mode < CONTROL_MODE_VELOCITY_CONTROL && config_.enable_torque_mode_vel_limit) {
+    if (!encoderless_brushed_torque
+            && config_.control_mode < CONTROL_MODE_VELOCITY_CONTROL
+            && config_.enable_torque_mode_vel_limit) {
         if (!vel_estimate.has_value()) {
             set_error(ERROR_INVALID_ESTIMATE);
             return false;
@@ -443,21 +448,37 @@ bool Controller::update() {
 
     float ideal_electrical_power = 0.0f;
     if (axis_->motor_.config_.motor_type != Motor::MOTOR_TYPE_GIMBAL) {
-        ideal_electrical_power = axis_->motor_.current_control_.power_ - \
-            SQ(axis_->motor_.current_control_.Iq_measured_) * 1.5f * axis_->motor_.config_.phase_resistance - \
-            SQ(axis_->motor_.current_control_.Id_measured_) * 1.5f * axis_->motor_.config_.phase_resistance;
+        const float copper_loss =
+            axis_->motor_.config_.motor_type == Motor::MOTOR_TYPE_BRUSHED_DC
+            ? SQ(axis_->motor_.current_control_.Iq_measured_) * axis_->motor_.config_.phase_resistance
+            : (SQ(axis_->motor_.current_control_.Iq_measured_)
+               + SQ(axis_->motor_.current_control_.Id_measured_))
+              * 1.5f * axis_->motor_.config_.phase_resistance;
+        ideal_electrical_power = axis_->motor_.current_control_.power_ - copper_loss;
     }
     else {
         ideal_electrical_power = axis_->motor_.current_control_.power_;
     }
-    mechanical_power_ += config_.mechanical_power_bandwidth * current_meas_period * (torque * *vel_estimate * M_PI * 2.0f - mechanical_power_);
+    if (vel_estimate.has_value()) {
+        mechanical_power_ += config_.mechanical_power_bandwidth * current_meas_period
+                * (torque * *vel_estimate * M_PI * 2.0f - mechanical_power_);
+    } else if (encoderless_brushed_torque) {
+        // Mechanical power cannot be observed without a speed sensor. Keep it
+        // neutral and retain electrical/current protection below this layer.
+        mechanical_power_ = 0.0f;
+    } else {
+        set_error(ERROR_INVALID_ESTIMATE);
+        return false;
+    }
     electrical_power_ += config_.electrical_power_bandwidth * current_meas_period * (ideal_electrical_power - electrical_power_);
 
     // Spinout check
     // If mechanical power is negative (braking) and measured power is positive, something is wrong
     // This indicates that the controller is trying to stop, but torque is being produced.
     // Usually caused by an incorrect encoder offset
-    if (mechanical_power_ < config_.spinout_mechanical_power_threshold && electrical_power_ > config_.spinout_electrical_power_threshold) {
+    if (!encoderless_brushed_torque
+            && mechanical_power_ < config_.spinout_mechanical_power_threshold
+            && electrical_power_ > config_.spinout_electrical_power_threshold) {
         set_error(ERROR_SPINOUT_DETECTED);
         return false;
     }

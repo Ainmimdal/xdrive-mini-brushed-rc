@@ -172,6 +172,10 @@ Motor::Motor(TIM_HandleTypeDef* timer,
         opamp_(opamp),
         fet_thermistor_(fet_thermistor),
         motor_thermistor_(motor_thermistor) {
+    brushed_dc_control_.Id_measured_report_ = &current_control_.Id_measured_;
+    brushed_dc_control_.Iq_measured_report_ = &current_control_.Iq_measured_;
+    brushed_dc_control_.power_report_ = &current_control_.power_;
+    brushed_dc_control_.current_limit_ = &effective_current_lim_;
     apply_config();
     fet_thermistor_.motor_ = this;
     motor_thermistor_.motor_ = this;
@@ -212,6 +216,16 @@ extern "C" volatile uint32_t g_enable_brake_snapshot;
 bool Motor::arm(PhaseControlLaw<3>* control_law) {
     g_arm_call_cnt++;
     odrive_drv_trace(0xF0);
+    bool arm_succeeded = false;
+
+    // A brushed motor must never be energized by a three-phase control law:
+    // phase A is intentionally disconnected and only B/C form the H-bridge.
+    if (config_.motor_type == MOTOR_TYPE_BRUSHED_DC &&
+            control_law != &brushed_dc_control_) {
+        error_ |= ERROR_CONTROLLER_FAILED;
+        return false;
+    }
+
     axis_->mechanical_brake_.release();
     odrive_drv_trace(0xF1);
 
@@ -229,6 +243,29 @@ bool Motor::arm(PhaseControlLaw<3>* control_law) {
         g_enable_brake_snapshot = odrv.config_.enable_brake_resistor ? 1 : 0;
         g_brake_resistor_armed_snapshot = brake_resistor_armed ? 1 : 0;
         if (!odrv.config_.enable_brake_resistor || brake_resistor_armed) {
+            TIM_TypeDef* tim = timer_->Instance;
+
+            // Change the phase-output mask only while the advanced timer's
+            // master output is unconditionally off. This prevents a partial
+            // CCER update from reaching the gate driver.
+            tim->BDTR &= ~TIM_BDTR_AOE;
+            __HAL_TIM_MOE_DISABLE_UNCONDITIONALLY(timer_);
+            tim->CCR1 = TIM_1_8_PERIOD_CLOCKS / 2;
+            tim->CCR2 = TIM_1_8_PERIOD_CLOCKS / 2;
+            tim->CCR3 = TIM_1_8_PERIOD_CLOCKS / 2;
+
+            constexpr uint32_t phase_a_outputs = TIM_CCER_CC1E | TIM_CCER_CC1NE;
+            constexpr uint32_t phase_b_outputs = TIM_CCER_CC2E | TIM_CCER_CC2NE;
+            constexpr uint32_t phase_c_outputs = TIM_CCER_CC3E | TIM_CCER_CC3NE;
+            constexpr uint32_t all_phase_outputs = phase_a_outputs
+                                                 | phase_b_outputs
+                                                 | phase_c_outputs;
+            const uint32_t enabled_outputs =
+                    config_.motor_type == MOTOR_TYPE_BRUSHED_DC
+                    ? phase_b_outputs | phase_c_outputs
+                    : all_phase_outputs;
+            tim->CCER = (tim->CCER & ~all_phase_outputs) | enabled_outputs;
+
             odrive_drv_trace(0xF3);
             armed_state_ = 1;
             is_armed_ = true;
@@ -239,13 +276,21 @@ bool Motor::arm(PhaseControlLaw<3>* control_law) {
             __DMB();
             g_arm_success_cnt++;
             g_arm_last_cl_ptr = (uint32_t)control_law_;
+            arm_succeeded = true;
         } else {
             odrive_drv_trace(0xF4);
             error_ |= Motor::ERROR_BRAKE_RESISTOR_DISARMED;
         }
     }
     odrive_drv_trace(0xF5);
-    return true;
+    return arm_succeeded;
+}
+
+void Motor::set_dynamic_brake(bool enabled) {
+    // Always forward a release so a request cannot remain latched while the
+    // motor type is changed away from brushed mode and later changed back.
+    brushed_dc_control_.set_dynamic_brake(
+            enabled && config_.motor_type == MOTOR_TYPE_BRUSHED_DC);
 }
 
 /**
@@ -343,13 +388,25 @@ void Motor::update_current_controller_gains() {
     float p_gain = config_.current_control_bandwidth * config_.phase_inductance;
     float plant_pole = config_.phase_resistance / config_.phase_inductance;
     current_control_.pi_gains_ = {p_gain, plant_pole * p_gain};
+    brushed_dc_control_.pi_gains_ = {p_gain, plant_pole * p_gain};
     // Propagate PI error deadband (see motor.hpp for rationale).
     current_control_.current_control_deadband_ = config_.current_control_deadband;
+    brushed_dc_control_.current_control_deadband_ = config_.current_control_deadband;
 }
 
 bool Motor::apply_config() {
     config_.parent = this;
     is_calibrated_ = config_.pre_calibrated;
+    if (config_.motor_type == MOTOR_TYPE_BRUSHED_DC &&
+            ((current_sensor_mask_ & 0b110) != 0b110
+             || !(config_.phase_resistance > 0.0f)
+             || !(config_.phase_inductance > 0.0f)
+             || !(config_.torque_constant > 0.0f))) {
+        // Not ready to run, but the config itself is valid: returning false
+        // here would make config_apply_all() fail at boot and erase every
+        // saved setting. Closed loop stays blocked until calibration passes.
+        is_calibrated_ = false;
+    }
     update_current_controller_gains();
     return true;
 }
@@ -551,6 +608,25 @@ bool Motor::run_calibration() {
             return false;
     } else if (config_.motor_type == MOTOR_TYPE_GIMBAL) {
         // no calibration needed
+    } else if (config_.motor_type == MOTOR_TYPE_BRUSHED_DC) {
+        // The three-phase R/L calibration laws are not valid with phase A
+        // disconnected. Validate the user-supplied terminal values instead.
+        if ((current_sensor_mask_ & 0b110) != 0b110) {
+            error_ |= ERROR_CURRENT_MEASUREMENT_UNAVAILABLE;
+            return false;
+        }
+        if (!(config_.phase_resistance > 0.0f)) {
+            error_ |= ERROR_PHASE_RESISTANCE_OUT_OF_RANGE;
+            return false;
+        }
+        if (!(config_.phase_inductance > 0.0f)) {
+            error_ |= ERROR_PHASE_INDUCTANCE_OUT_OF_RANGE;
+            return false;
+        }
+        if (!(config_.torque_constant > 0.0f)) {
+            error_ |= ERROR_UNKNOWN_TORQUE;
+            return false;
+        }
     } else {
         return false;
     }
@@ -573,6 +649,10 @@ void Motor::update(uint32_t timestamp) {
     // Load setpoints from previous iteration.
     auto [id, iq] = Idq_setpoint_.previous()
                      .value_or(float2D{0.0f, 0.0f});
+    const bool is_brushed = config_.motor_type == MOTOR_TYPE_BRUSHED_DC;
+    if (is_brushed) {
+        id = 0.0f;
+    }
     // Load effective current limit
     float ilim = axis_->motor_.effective_current_lim_;
 
@@ -593,10 +673,15 @@ void Motor::update(uint32_t timestamp) {
         iq = torque / axis_->motor_.config_.torque_constant;
     }
 
-    // 2-norm clamping where Id takes priority
-    float iq_lim_sqr = SQ(ilim) - SQ(id);
-    float Iq_lim = (iq_lim_sqr <= 0.0f) ? 0.0f : sqrt(iq_lim_sqr);
-    iq = std::clamp(iq, -Iq_lim, Iq_lim);
+    if (is_brushed) {
+        // Iq represents the physical armature current in brushed mode.
+        iq = std::clamp(iq, -ilim, ilim);
+    } else {
+        // 2-norm clamping where Id takes priority
+        float iq_lim_sqr = SQ(ilim) - SQ(id);
+        float Iq_lim = (iq_lim_sqr <= 0.0f) ? 0.0f : sqrt(iq_lim_sqr);
+        iq = std::clamp(iq, -Iq_lim, Iq_lim);
+    }
 
     if (axis_->motor_.config_.motor_type != Motor::MOTOR_TYPE_GIMBAL) {
         Idq_setpoint_ = {id, iq};
@@ -615,7 +700,10 @@ void Motor::update(uint32_t timestamp) {
 
     std::optional<float> phase_vel = phase_vel_src_.present();
 
-    if (config_.R_wL_FF_enable) {
+    if (is_brushed && config_.R_wL_FF_enable) {
+        // There are no rotating d/q inductance cross terms in a DC armature.
+        vq += config_.phase_resistance * iq;
+    } else if (config_.R_wL_FF_enable) {
         if (!phase_vel.has_value()) {
             error_ |= ERROR_UNKNOWN_PHASE_VEL;
             return;
@@ -627,7 +715,19 @@ void Motor::update(uint32_t timestamp) {
         vq += config_.phase_resistance * iq;
     }
 
-    if (config_.bEMF_FF_enable) {
+    if (is_brushed && config_.bEMF_FF_enable) {
+        if (!phase_vel.has_value() && axis_->uses_encoderless_brushed_torque_control()) {
+            // Back-EMF feed-forward is unavailable without speed feedback. The
+            // armature-current PI loop remains fully operational.
+        } else if (!phase_vel.has_value() || config_.pole_pairs <= 0) {
+            error_ |= ERROR_UNKNOWN_PHASE_VEL;
+            return;
+        } else {
+            // Encoder phase velocity is mechanical rad/s times pole_pairs. In
+            // SI, the brushed torque constant is also its back-EMF constant.
+            vq += (*phase_vel / config_.pole_pairs) * config_.torque_constant;
+        }
+    } else if (config_.bEMF_FF_enable) {
         if (!phase_vel.has_value()) {
             error_ |= ERROR_UNKNOWN_PHASE_VEL;
             return;
@@ -688,9 +788,16 @@ void Motor::current_meas_cb(uint32_t timestamp, std::optional<Iph_ABC_t> current
         // If Ia + Ib + Ic == 0 holds then we have:
         // Inorm^2 = Id^2 + Iq^2 = Ialpha^2 + Ibeta^2 = 2/3 * (Ia^2 + Ib^2 + Ic^2)
         float Itrip = effective_current_lim_ + config_.current_lim_margin;
-        float Inorm_sq = 2.0f / 3.0f * (SQ(current_meas_->phA)
-                                      + SQ(current_meas_->phB)
-                                      + SQ(current_meas_->phC));
+        float Inorm_sq;
+        if (config_.motor_type == MOTOR_TYPE_BRUSHED_DC) {
+            const float armature_current = 0.5f *
+                    (current_meas_->phB - current_meas_->phC);
+            Inorm_sq = SQ(armature_current);
+        } else {
+            Inorm_sq = 2.0f / 3.0f * (SQ(current_meas_->phA)
+                                            + SQ(current_meas_->phB)
+                                            + SQ(current_meas_->phC));
+        }
 
         // Hack: we disable the current check during motor calibration because
         // it tends to briefly overshoot when the motor moves to align flux with I_alpha

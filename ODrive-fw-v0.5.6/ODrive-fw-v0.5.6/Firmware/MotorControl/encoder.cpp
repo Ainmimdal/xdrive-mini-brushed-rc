@@ -36,6 +36,10 @@ bool Encoder::apply_config(ODriveIntf::MotorIntf::MotorType motor_type) {
         if (motor_type == Motor::MOTOR_TYPE_ACIM)
             is_ready_ = true;
     }
+    // Brushed control never uses the electrical phase, so no offset
+    // calibration is needed before the encoder can be used.
+    if (motor_type == Motor::MOTOR_TYPE_BRUSHED_DC)
+        is_ready_ = true;
 
     return true;
 }
@@ -196,7 +200,8 @@ void Encoder::update_pll_gains() {
 
 void Encoder::check_pre_calibrated() {
     // TODO: restoring config from python backup is fragile here (ACIM motor type must be set first)
-    if (axis_->motor_.config_.motor_type != Motor::MOTOR_TYPE_ACIM) {
+    if (axis_->motor_.config_.motor_type != Motor::MOTOR_TYPE_ACIM
+            && axis_->motor_.config_.motor_type != Motor::MOTOR_TYPE_BRUSHED_DC) {
         if (!is_ready_)
             config_.pre_calibrated = false;
         if (mode_ == MODE_INCREMENTAL && !index_found_)

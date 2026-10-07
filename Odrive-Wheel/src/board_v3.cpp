@@ -257,6 +257,8 @@ std::array<GpioFunction, 3> alternate_functions[GPIO_COUNT] = {
 #if HW_VERSION_MINOR <= 2
 PwmInput pwm0_input{&htim5, {0, 0, 0, 4}}; // 0 means not in use
 #else
+// MKS XDrive Mini: GPIO1 (PA0 / TIM5_CH1) is the RC PWM input.
+// GPIO2 (PA1) is reserved as a digital direction input by pwm_input.cpp.
 PwmInput pwm0_input{&htim5, {1, 2, 3, 4}};
 #endif
 

@@ -65,7 +65,7 @@ struct BoardConfig_t {
         DEFAULT_GPIO_MODES
     };
 
-    bool enable_uart_a = true;
+    bool enable_uart_a = false;
     bool enable_uart_b = false;
     bool enable_uart_c = false;
     uint32_t uart_a_baudrate = 115200;
@@ -73,6 +73,11 @@ struct BoardConfig_t {
     uint32_t uart_c_baudrate = 115200;
     bool enable_can_a = true;
     bool enable_i2c_a = false;
+    uint8_t rc_pwm_target = 0; // 0 = gpio1_pwm_mapping.endpoint, 1/2/3 = axis0 input_torque/input_vel/input_pos
+    uint16_t rc_pwm_direction_gpio = 0;
+    bool rc_pwm_direction_active_high = true;
+    uint32_t rc_pwm_timeout_ms = 100;
+    bool rc_pwm_timeout_dynamic_brake = false;
     ODriveIntf::StreamProtocolType uart0_protocol = ODriveIntf::STREAM_PROTOCOL_TYPE_ASCII_AND_STDOUT;
     ODriveIntf::StreamProtocolType uart1_protocol = ODriveIntf::STREAM_PROTOCOL_TYPE_ASCII_AND_STDOUT;
     ODriveIntf::StreamProtocolType uart2_protocol = ODriveIntf::STREAM_PROTOCOL_TYPE_ASCII_AND_STDOUT;

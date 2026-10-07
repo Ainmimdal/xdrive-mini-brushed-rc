@@ -314,6 +314,43 @@ interfaces:
           This setting has no effect if `enable_can_a` is also true.
           This setting has no effect on ODrive v3.2 or earlier.
           Changing this setting requires a reboot.
+      rc_pwm_target:
+        type: uint8
+        doc: |
+          Where the GPIO1 RC PWM value goes. 0 uses `gpio1_pwm_mapping.endpoint`
+          (stock behaviour, needs odrivetool to set). 1 = axis0 input_torque,
+          2 = axis0 input_vel, 3 = axis0 input_pos. 1 to 3 can be set over
+          the ASCII protocol. The value range always comes from
+          `gpio1_pwm_mapping.min` and `gpio1_pwm_mapping.max`.
+          Changing this setting requires a reboot.
+      rc_pwm_direction_gpio:
+        type: uint16
+        doc: |
+          Logical GPIO used to select the sign of the GPIO1 RC PWM mapping.
+          The selected GPIO must use a digital input mode. GPIO 0 disables
+          direction control (default). GPIO2 is pre-configured as a
+          pulled-down digital input, so set this to 2 to use it.
+          Changing this setting requires a reboot.
+      rc_pwm_direction_active_high:
+        type: bool
+        doc: |
+          If true, a high direction input selects the positive mapped value and
+          a low input selects the negative mapped value. If false, this is
+          reversed.
+      rc_pwm_timeout_ms:
+        type: uint32
+        unit: ms
+        doc: |
+          Maximum time after a valid GPIO1 RC PWM pulse before the mapped
+          endpoint is set to zero. If axis0 is in position control the last
+          position is held instead of commanding position 0.
+          Set to 0 to disable the pulse-loss failsafe.
+      rc_pwm_timeout_dynamic_brake:
+        type: bool
+        doc: |
+          If true, a brushed motor on axis 0 enters current-limited dynamic
+          braking when the GPIO1 RC PWM pulse-loss timeout expires. This is
+          ignored for non-brushed motors.
       usb_cdc_protocol:
         type: StreamProtocolType
         doc: |
@@ -862,7 +899,7 @@ interfaces:
           phase_inductance: {type: float32, unit: henry, c_setter: set_phase_inductance}
           phase_resistance: {type: float32, unit: ohm, c_setter: set_phase_resistance}
           torque_constant: {type: float32, unit: N·m/A}
-          motor_type: MotorType
+          motor_type: {type: MotorType, c_setter: set_motor_type}
           current_lim: 
             type: float32
             unit: A
@@ -1754,3 +1791,10 @@ valuetypes:
       ACIM:
         doc: |
           Used for FOC control of AC Induction Motors (ACIM), aka Asynchronous motors, 
+      BRUSHED_DC:
+        value: 4
+        doc: |
+          Drives a two-terminal brushed DC motor as an H-bridge between motor
+          phase B and phase C. Phase A is disabled. The phase resistance and
+          phase inductance settings are interpreted as terminal-to-terminal
+          armature values and must be supplied by the user.

@@ -7,6 +7,7 @@ class Motor;
 #include <board.h>
 #include <autogen/interfaces.hpp>
 #include "foc.hpp"
+#include "brushed_dc.hpp"
 
 class Motor : public ODriveIntf::MotorIntf {
 public:
@@ -64,6 +65,14 @@ public:
         }
         void set_phase_inductance(float value) { phase_inductance = value; parent->update_current_controller_gains(); }
         void set_phase_resistance(float value) { phase_resistance = value; parent->update_current_controller_gains(); }
+        void set_motor_type(MotorType value) {
+            // A timeout brake request is only meaningful for the currently
+            // selected brushed bridge. Never carry it across a mode change.
+            parent->set_dynamic_brake(false);
+            parent->disarm();
+            motor_type = value;
+            parent->apply_config();
+        }
         void set_current_control_bandwidth(float value) { current_control_bandwidth = value; parent->update_current_controller_gains(); }
         void set_current_control_deadband(float value) { current_control_deadband = value < 0.0f ? 0.0f : value; parent->update_current_controller_gains(); }
     };
@@ -77,6 +86,7 @@ public:
          OffboardThermistorCurrentLimiter& motor_thermistor);
 
     bool arm(PhaseControlLaw<3>* control_law);
+    void set_dynamic_brake(bool enabled);
     void apply_pwm_timings(uint16_t timings[3], bool tentative);
     bool disarm(bool* was_armed = nullptr);
     bool apply_config();
@@ -129,6 +139,7 @@ public:
     float I_bus_ = 0.0f; // this motors contribution to the bus current
     float phase_current_rev_gain_ = 0.0f; // Reverse gain for ADC to Amps (to be set by DRV8301_setup)
     FieldOrientedController current_control_;
+    BrushedDCController brushed_dc_control_;
     float effective_current_lim_ = 10.0f; // [A]
     float max_allowed_current_ = 0.0f; // [A] set in setup()
     float max_dc_calib_ = 0.0f; // [A] set in setup()

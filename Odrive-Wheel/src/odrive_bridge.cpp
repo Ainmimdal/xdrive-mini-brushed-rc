@@ -24,7 +24,14 @@ extern "C" void odrive_bridge_set_input_torque(float nm) {
     // + input_mode=PASSTHROUGH. Fora desses estados, escrita é ignorada pelo
     // Controller::update(). Defaults bakados no firmware atendem (control_mode=1,
     // input_mode=1) mas state precisa ser setado via ASCII ou pela UI HTML.
+#if ODRIVE_WHEEL_FFB_MOTOR_OUTPUT
     axes[0].controller_.input_torque_ = nm;
+#else
+    // FFB motor output disabled at build time: the FFB stack keeps running
+    // (USB, config tool, HID position report) but never commands the motor,
+    // so input_torque stays owned by the user (ASCII/USB, CAN, RC PWM).
+    (void)nm;
+#endif
 }
 
 // Bus current/voltage readouts — usados pelo peak tracker do ffb_task.

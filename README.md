@@ -1,3 +1,5 @@
+> **Fork note:** this fork adds brushed DC motor support (motor between phases B and C), RC PWM control on GPIO1 with optional direction pin and signal-loss failsafe, and builds with FFB motor output off by default (`make FFB_MOTOR_OUTPUT=1` restores the wheel). All new settings and changed defaults: [docs/BRUSHED_RC_SETTINGS.md](docs/BRUSHED_RC_SETTINGS.md). Based on [eagabriel/Odrive-Wheel](https://github.com/eagabriel/Odrive-Wheel).
+
 # Odrive-Wheel — MKS XDrive Mini / ODESC V4.2 FFB Firmware
 
 Custom firmware for ODrive v0.5.6 running on **MKS XDrive Mini** and

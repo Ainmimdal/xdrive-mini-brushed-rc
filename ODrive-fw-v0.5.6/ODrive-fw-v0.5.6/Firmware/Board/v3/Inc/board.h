@@ -48,8 +48,8 @@
 
 #define DEFAULT_GPIO_MODES \
     ODriveIntf::GPIO_MODE_DIGITAL, \
-    ODriveIntf::GPIO_MODE_UART_A, \
-    ODriveIntf::GPIO_MODE_UART_A, \
+    ODriveIntf::GPIO_MODE_PWM, \
+    ODriveIntf::GPIO_MODE_DIGITAL_PULL_DOWN, \
     ODriveIntf::GPIO_MODE_ANALOG_IN, \
     ODriveIntf::GPIO_MODE_ANALOG_IN, \
     ODriveIntf::GPIO_MODE_ANALOG_IN, \

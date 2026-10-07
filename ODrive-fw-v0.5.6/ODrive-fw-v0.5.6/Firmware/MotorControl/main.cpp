@@ -375,6 +375,7 @@ void ODrive::sampling_cb() {
 void ODrive::control_loop_cb(uint32_t timestamp) {
     last_update_timestamp_ = timestamp;
     n_evt_control_loop_++;
+    pwm0_input.update();
 
     // TODO: use a configurable component list for most of the following things
 
@@ -465,7 +466,11 @@ void ODrive::control_loop_cb(uint32_t timestamp) {
             axis.motor_.update(timestamp); // uses torque from controller and phase_vel from encoder
 
         MEASURE_TIME(axis.task_times_.current_controller_update)
-            axis.motor_.current_control_.update(timestamp); // uses the output of controller_ or open_loop_contoller_ and encoder_ or sensorless_estimator_ or acim_estimator_
+            if (axis.motor_.config_.motor_type == Motor::MOTOR_TYPE_BRUSHED_DC) {
+                axis.motor_.brushed_dc_control_.update(timestamp);
+            } else {
+                axis.motor_.current_control_.update(timestamp); // uses the output of controller_ or open_loop_contoller_ and encoder_ or sensorless_estimator_ or acim_estimator_
+            }
     }
 
     // Tell the axis threads that the control loop has finished
